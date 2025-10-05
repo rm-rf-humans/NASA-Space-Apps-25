@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>3D Dataset Explorer</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    /* Dark theme for dataset explorer */
+    body {
+      background-color: #010813;
+      color: #e2e8f0;
+      overflow-x: hidden;
+    }
+    .top-bar {
+      background: rgba(7, 20, 45, 0.8);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      color: #f8fafc;
+      font-weight: 600;
+      font-size: 1.1rem;
+    }
+    .panel {
+      background: rgba(7, 20, 45, 0.85);
+      border-radius: 8px;
+      backdrop-filter: blur(4px);
+      box-shadow: 0 4px 10px rgba(0,0,0,0.4);
+      padding: 1rem;
+      color: #e2e8f0;
+    }
+    .panel h5 {
+      margin-bottom: 1rem;
+      font-weight: 600;
+    }
+    .list-group-item {
+      background: rgba(255, 255, 255, 0.05);
+      color: #e2e8f0;
+      border: none;
+      cursor: pointer;
+    }
+    .list-group-item:hover, .list-group-item.active {
+      background: rgba(255, 255, 255, 0.12);
+    }
+    /* Removed habitability button styling since the button was removed */
+
+    /* Details panel pinned to the far right so it doesn't block the main view */
+    .fixed-details {
+      position: fixed;
+      top: 80px;
+      right: 10px;
+      width: 320px;
+      max-height: calc(100% - 100px);
+      overflow-y: auto;
+      z-index: 2;
+    }
+    #orbit-background {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 0;
+      overflow: hidden;
+      pointer-events: none;
+    }
+    #ui-container {
+      position: relative;
+      z-index: 1;
+    }
+    #planetListContainer {
+      scrollbar-width: thin;
+      scrollbar-color: #888 #2a3658;
+    }
+    #planetListContainer::-webkit-scrollbar {
+      width: 6px;
+    }
+    #planetListContainer::-webkit-scrollbar-track {
+      background: #2a3658;
+    }
+    #planetListContainer::-webkit-scrollbar-thumb {
+      background-color: #888;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+<div id="orbit-background"></div>
+<div id="ui-container" class="container-fluid py-3 px-4">
+  <!-- Back link and summary bar -->
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <a href="/" class="btn btn-light btn-sm"><i class="fas fa-arrow-left me-1"></i>Back</a>
+    <div class="top-bar d-flex justify-content-between w-100 ms-2">
+      <div id="totalCount">0 exoplanets</div>
+      <div id="filteredCount">0 focused</div>
+    </div>
+  </div>
+  <div class="row g-4">
+    <!-- Filters panel -->
+    <div class="col-md-4 col-lg-3">
+      <div class="panel">
+        <h5>Exoplanet Filters</h5>
+        <!-- Removed HWO telescope config and SNR threshold to simplify the filter UI -->
+        <div class="mb-3">
+          <label for="datasetSelect" class="form-label">Mission / Dataset</label>
+          <select id="datasetSelect" class="form-select">
+            <!-- Populated dynamically with datasets -->
+          </select>
+        </div>
+        <div class="form-check form-switch mb-3">
+          <input class="form-check-input" type="checkbox" id="showAllDatasets">
+          <label class="form-check-label" for="showAllDatasets">Show all planets</label>
+        </div>
+        <div class="mb-3">
+          <label for="categorySelect" class="form-label">Exoplanet Category</label>
+          <select id="categorySelect" class="form-select">
+            <!-- Populated dynamically -->
+          </select>
+        </div>
+        <button id="applyFiltersBtn" class="btn btn-primary w-100 mb-3">Apply Filters</button>
+        <div id="planetListContainer" class="overflow-auto" style="max-height: 380px;">
+          <ul class="list-group" id="planetList"></ul>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- Details panel moved outside the row and pinned to the far right -->
+  <div id="detailsPanel" class="panel fixed-details">
+    <h5 id="detailsTitle">Select a planet</h5>
+    <ul class="list-unstyled" id="detailsList">
+      <li>Select a planet from the list to view details.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- Three.js for background orbit viewer -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+  /*
+   * Initialize background orbit scene for dataset explorer. This is similar to
+   * the background from the advanced design. It displays a star and a single
+   * orbiting planet, with an orbit line updated when the user selects a planet.
+   */
+  function initBackgroundOrbit() {
+    const container = document.getElementById('orbit-background');
+    const scene = new THREE.Scene();
+    // We intentionally omit the star field to keep the orbit visualization clean. If desired, you
+    // can restore it by reintroducing a BufferGeometry with random points and adding a
+    // THREE.Points object to the scene.
+    // Camera setup
+    const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 800);
+    camera.position.set(0, 15, 30);
+    camera.lookAt(0, 0, 0);
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    container.appendChild(renderer.domElement);
+    // Add lights
+    const ambient = new THREE.AmbientLight(0xffffff, 0.5);
+    scene.add(ambient);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    dirLight.position.set(6, 12, 8);
+    scene.add(dirLight);
+    // Load textures
+    const loader = new THREE.TextureLoader();
+    const starTex   = loader.load("{{ url_for('static', filename='textures/star_texture.png') }}");
+    const planetTex = loader.load("{{ url_for('static', filename='textures/planet_texture.png') }}");
+    const starMat   = new THREE.MeshPhongMaterial({ map: starTex, emissive: 0xffdd66, emissiveIntensity: 0.8 });
+    const planetBaseMat = new THREE.MeshPhongMaterial({ map: planetTex, shininess: 25 });
+    const starMesh  = new THREE.Mesh(new THREE.SphereGeometry(1.0, 64, 64), starMat);
+    scene.add(starMesh);
+    // Single planet mesh (used when not showing all)
+    const singlePlanet = new THREE.Mesh(new THREE.SphereGeometry(0.2, 64, 64), planetBaseMat.clone());
+    scene.add(singlePlanet);
+    // Data structures for multi-planet display
+    let singleOrbitLine;
+    let planetMeshes = [];
+    let orbitLines    = [];
+    let showAllOrbits = false;
+    // Colour palette per dataset for differentiation
+    const datasetColors = {
+      kepler: 0xff5555,
+      k2:     0x55ff55,
+      tess:   0x5555ff,
+      default: 0xffffff
+    };
+    // Configuration for single planet orbit
+    let orbitConfig = { radius: 6.0, speed: 0.003, color: 0xffffff };
+    let theta = 0;
+    // Create a circular orbit line with a specific radius and colour
+    function createOrbitLine(radius, color = 0xffffff) {
+      const curve = new THREE.EllipseCurve(0, 0, radius, radius, 0, 2 * Math.PI, false, 0);
+      const pts = curve.getPoints(256).map(p => new THREE.Vector3(p.x, 0, p.y));
+      const geom = new THREE.BufferGeometry().setFromPoints(pts);
+      const mat = new THREE.LineBasicMaterial({ color: color, opacity: 0.2, transparent: true });
+      return new THREE.LineLoop(geom, mat);
+    }
+    // Update the single orbit line (used in single-planet mode)
+    function updateSingleOrbitLine(radius, color = 0xffffff) {
+      if (singleOrbitLine) scene.remove(singleOrbitLine);
+      singleOrbitLine = createOrbitLine(radius, color);
+      scene.add(singleOrbitLine);
+    }
+    // Remove all existing multi-planet orbit lines
+    function clearOrbitLines() {
+      orbitLines.forEach(line => scene.remove(line));
+      orbitLines = [];
+    }
+    // Remove all existing multi-planet meshes
+    function clearPlanetMeshes() {
+      planetMeshes.forEach(item => scene.remove(item.mesh));
+      planetMeshes = [];
+    }
+    // Display a single planet's orbit and hide others
+    function displayPlanet(entry) {
+      showAllOrbits = false;
+      clearOrbitLines();
+      clearPlanetMeshes();
+      singlePlanet.visible = true;
+      // Determine orbit parameters; if entry is null, use default
+      if (!entry) {
+        orbitConfig.radius = 6.0;
+        orbitConfig.speed  = 0.003;
+        orbitConfig.color  = 0xffffff;
+        theta = 0;
+        updateSingleOrbitLine(orbitConfig.radius, orbitConfig.color);
+      } else {
+        const rVal  = entry.radius || 1;
+        const period = entry.period || 365;
+        orbitConfig.radius = 4.0 + rVal * 0.6;
+        orbitConfig.speed  = 0.001 + Math.min((1 / period) * 0.1, 0.05);
+        orbitConfig.color  = datasetColors[entry.dataset] || 0xffffff;
+        theta = 0;
+        singlePlanet.material.color.setHex(orbitConfig.color);
+        updateSingleOrbitLine(orbitConfig.radius, orbitConfig.color);
+      }
+    }
+    // Display all planets from a list with separate colours and orbits
+    function displayPlanets(list) {
+      showAllOrbits = true;
+      clearOrbitLines();
+      clearPlanetMeshes();
+      singlePlanet.visible = false;
+      // For each planet create a mesh and orbit line
+      list.forEach((p, idx) => {
+        const rVal  = p.radius || 1;
+        const period = p.period || 365;
+        const radius = 4.0 + rVal * 0.6;
+        const speed  = 0.001 + Math.min((1 / period) * 0.1, 0.05);
+        const color  = datasetColors[p.dataset] || datasetColors.default;
+        const mesh   = new THREE.Mesh(new THREE.SphereGeometry(0.2, 64, 64),
+                                      new THREE.MeshPhongMaterial({ map: planetTex, color: color, shininess: 25 }));
+        mesh.position.set(radius, 0, 0);
+        scene.add(mesh);
+        planetMeshes.push({ mesh: mesh, radius: radius, speed: speed, color: color, theta: 0 });
+        // Add orbit line
+        const line = createOrbitLine(radius, color);
+        scene.add(line);
+        orbitLines.push(line);
+      });
+    }
+    // Expose methods to global scope for interaction
+    window.displayPlanet  = displayPlanet;
+    window.displayPlanets = displayPlanets;
+    window.resetOrbitDisplay = function() {
+      displayPlanet(null);
+    };
+    // Initialize with default single orbit
+    displayPlanet(null);
+    // Animation loop
+    function animate() {
+      requestAnimationFrame(animate);
+      if (showAllOrbits && planetMeshes.length > 0) {
+        planetMeshes.forEach(item => {
+          item.theta += item.speed;
+          item.mesh.position.set(item.radius * Math.cos(item.theta), 0, item.radius * Math.sin(item.theta));
+        });
+      } else {
+        theta += orbitConfig.speed;
+        singlePlanet.position.set(orbitConfig.radius * Math.cos(theta), 0, orbitConfig.radius * Math.sin(theta));
+      }
+      renderer.render(scene, camera);
+    }
+    animate();
+    window.addEventListener('resize', () => {
+      camera.aspect = container.clientWidth / container.clientHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(container.clientWidth, container.clientHeight);
+    });
+  }
+  document.addEventListener('DOMContentLoaded', initBackgroundOrbit);
+</script>
+
+<!-- Data filtering and details script -->
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    const totalCountEl    = document.getElementById('totalCount');
+    const filteredCountEl = document.getElementById('filteredCount');
+    const categorySelect  = document.getElementById('categorySelect');
+    const datasetSelect   = document.getElementById('datasetSelect');
+    const showAllCheckbox = document.getElementById('showAllDatasets');
+    const applyBtn        = document.getElementById('applyFiltersBtn');
+    const planetListEl    = document.getElementById('planetList');
+    const detailsTitleEl  = document.getElementById('detailsTitle');
+    const detailsListEl   = document.getElementById('detailsList');
+    let allPlanets = [];
+    let filteredPlanets = [];
+    fetch("{{ url_for('static', filename='data/exoplanets.json') }}")
+      .then(res => res.json())
+      .then(data => {
+        // Flatten planets and tag each with its dataset name
+        allPlanets = [];
+        Object.entries(data).forEach(([datasetName, list]) => {
+          list.forEach(p => {
+            const planet = Object.assign({}, p);
+            planet.dataset = datasetName;
+            allPlanets.push(planet);
+          });
+        });
+        // Derive SNR and category for each planet
+        allPlanets.forEach(p => {
+          const snr = (p.radius && p.star_radius && p.star_radius > 0) ? (p.radius / p.star_radius * 100) : 0;
+          p.snr = snr;
+          const r = p.radius || 0;
+          let cat = 'Unknown';
+          if (r < 1.25) cat = 'Terrestrial';
+          else if (r < 2.0) cat = 'Super-earth';
+          else if (r < 4.0) cat = 'Mini-Neptune';
+          else if (r < 6.0) cat = 'Neptune-like';
+          else cat = 'Gas giant';
+          p.category = cat;
+        });
+        // Populate dataset filter options
+        const datasets = Array.from(new Set(allPlanets.map(p => p.dataset))).sort();
+        datasetSelect.innerHTML = '<option value="all">All</option>' + datasets.map(ds => {
+          const label = ds.charAt(0).toUpperCase() + ds.slice(1);
+          return `<option value="${ds}">${label}</option>`;
+        }).join('');
+        // Populate category options
+        const categories = Array.from(new Set(allPlanets.map(p => p.category))).sort();
+        categorySelect.innerHTML = '<option value="all">All</option>' + categories.map(c => `<option value="${c}">${c}</option>`).join('');
+        // Set counts and apply initial filters
+        totalCountEl.textContent = allPlanets.length + ' exoplanets';
+        applyFilters();
+      })
+      .catch(err => console.error('Failed to load data', err));
+    function applyFilters() {
+      const cat    = categorySelect.value;
+      // If the "show all" toggle is active, ignore the dataset dropdown
+      const showAllFlag = showAllCheckbox && showAllCheckbox.checked;
+      let ds = datasetSelect.value;
+      if (showAllFlag) ds = 'all';
+      // Filter planets by selected category and dataset
+      filteredPlanets = allPlanets.filter(p => {
+        const catOk = cat === 'all' || p.category === cat;
+        const dsOk  = ds === 'all'  || p.dataset === ds;
+        return catOk && dsOk;
+      });
+      filteredCountEl.textContent = filteredPlanets.length + ' focused';
+      renderList();
+      // Update the 3D orbit display
+      if (showAllFlag) {
+        if (filteredPlanets.length > 0 && typeof displayPlanets === 'function') {
+          displayPlanets(filteredPlanets);
+        } else if (typeof resetOrbitDisplay === 'function') {
+          resetOrbitDisplay();
+        }
+      } else {
+        // In single-planet mode, reset the orbit display to default; a specific planet will be shown when selected
+        if (typeof resetOrbitDisplay === 'function') {
+          resetOrbitDisplay();
+        }
+      }
+    }
+    function renderList() {
+      planetListEl.innerHTML = '';
+      if (filteredPlanets.length === 0) {
+        const li = document.createElement('li');
+        li.className = 'list-group-item';
+        li.textContent = 'No planets match the filters.';
+        planetListEl.appendChild(li);
+        return;
+      }
+      filteredPlanets.forEach(p => {
+        const li = document.createElement('li');
+        li.className = 'list-group-item';
+        li.textContent = `${p.name} - ${p.host || ''}`;
+        li.addEventListener('click', () => {
+          document.querySelectorAll('#planetList .list-group-item').forEach(item => item.classList.remove('active'));
+          li.classList.add('active');
+          showDetails(p);
+        });
+        planetListEl.appendChild(li);
+      });
+    }
+    function showDetails(p) {
+      detailsTitleEl.textContent = `${p.name} Details`;
+      const items = [];
+      items.push(`<li><strong>Planet Name:</strong> ${p.name || 'unknown'}</li>`);
+      items.push(`<li><strong>Host Name:</strong> ${p.host || 'unknown'}</li>`);
+      items.push(`<li><strong>Stars:</strong> ${p.stars !== undefined ? p.stars : 'unknown'}</li>`);
+      items.push(`<li><strong>Discovery Year:</strong> ${p.discovery_year || 'unknown'}</li>`);
+      items.push(`<li><strong>Discovery Method:</strong> ${p.discovery_method || 'unknown'}</li>`);
+      items.push(`<li><strong>Planet Radius (R\u2295):</strong> ${p.radius !== undefined ? p.radius.toFixed(2) : 'unknown'}</li>`);
+      items.push(`<li><strong>Stellar Radius (R\u2609):</strong> ${p.star_radius !== undefined ? p.star_radius.toFixed(2) : 'unknown'}</li>`);
+      items.push(`<li><strong>Effective Temp. (K):</strong> ${p.star_temp !== undefined ? p.star_temp.toFixed(1) : 'unknown'}</li>`);
+      items.push(`<li><strong>Distance (pc):</strong> ${p.distance !== undefined ? p.distance.toFixed(2) : 'unknown'}</li>`);
+      items.push(`<li><strong>Surface Gravity (log g):</strong> ${p.surface_gravity !== undefined ? p.surface_gravity.toFixed(2) : 'unknown'}</li>`);
+      items.push(`<li><strong>Spectral Type:</strong> ${p.spectral_type || 'unknown'}</li>`);
+      items.push(`<li><strong>Orbital Period (days):</strong> ${p.period !== undefined ? p.period.toFixed(2) : 'unknown'}</li>`);
+      items.push(`<li><strong>Category:</strong> ${p.category || 'unknown'}</li>`);
+      detailsListEl.innerHTML = items.join('');
+      // Removed habitability prediction: we simply display the planet attributes without
+      // evaluating habitability.
+      // Show selected planet's orbit only when not in "show all" mode
+      if (showAllCheckbox && !showAllCheckbox.checked) {
+        if (typeof displayPlanet === 'function') {
+          displayPlanet(p);
+        }
+      }
+    }
+    applyBtn.addEventListener('click', applyFilters);
+    [categorySelect, datasetSelect, showAllCheckbox].forEach(el => {
+      el && el.addEventListener('change', applyFilters);
+    });
+  });
+</script>
+</body>
+</html>

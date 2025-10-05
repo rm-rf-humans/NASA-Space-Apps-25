@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Classification Result</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+  <!-- Font Awesome for enlarge icon -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    .fullscreen {
+      position: fixed !important;
+      top: 0;
+      left: 0;
+      width: 100% !important;
+      height: 100% !important;
+      z-index: 1050;
+      background: #ffffff;
+    }
+    .orbit-container-wrapper {
+      position: relative;
+    }
+    .enlarge-btn {
+      position: absolute;
+      top: 5px;
+      right: 5px;
+      z-index: 20;
+    }
+  </style>
+</head>
+<body>
+<div class="container my-4">
+  <h1 class="mb-4">Classification Result</h1>
+  <p><strong>Predicted Class:</strong> {{ predicted_class }}</p>
+  <h4>Class Probabilities (placeholders)</h4>
+  <ul>
+    {% for label, prob in probabilities.items() %}
+      <li>{{ label }}: {{ prob | round(3) }}</li>
+    {% endfor %}
+  </ul>
+  <h4>Feature Contributions</h4>
+  {% if contributions %}
+    <ul>
+      {% for name, value in contributions %}
+        <li>{{ name }}: {{ value }}</li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>No interpretability data available. Integrate SHAP/LIME to view feature contributions.</p>
+  {% endif %}
+  <hr class="my-4">
+  <!-- Benchmark images -->
+  <div class="row">
+    <div class="col-md-6 text-center">
+      <h5>Confusion Matrix</h5>
+      <img src="{{ url_for('static', filename='img/confusion_matrix.png') }}" alt="Confusion Matrix" class="img-fluid mb-3">
+    </div>
+    <div class="col-md-6 text-center">
+      <h5>Calibration Plot</h5>
+      <img src="{{ url_for('static', filename='img/calibration_plot.png') }}" alt="Calibration Plot" class="img-fluid mb-3">
+    </div>
+  </div>
+  <hr class="my-4">
+  <!-- 3D orbit viewer on result page as well -->
+  <h4>3D Orbit Viewer</h4>
+  <p class="text-muted">Below is a WebGL demonstration of a planet orbiting its host star. Select a famous dataset to load typical orbital parameters.</p>
+  <div class="mb-3 row">
+    <label for="datasetSelectResult" class="col-sm-3 col-form-label">Select dataset</label>
+    <div class="col-sm-9">
+      <select id="datasetSelectResult" class="form-select">
+        <option value="default" selected>Default Orbit</option>
+        <option value="kepler">Kepler</option>
+        <option value="k2">K2</option>
+        <option value="tess">TESS</option>
+      </select>
+    </div>
+  </div>
+  <!-- Planet selector populated dynamically; hidden until a dataset is chosen -->
+  <div class="mb-3 row" id="planet-row-result" style="display: none;">
+    <label for="planetSelectResult" class="col-sm-3 col-form-label">Select planet</label>
+    <div class="col-sm-9">
+      <select id="planetSelectResult" class="form-select"></select>
+    </div>
+  </div>
+    <!-- Show all planets toggle -->
+    <div class="form-check mb-3">
+      <input class="form-check-input" type="checkbox" id="showAllCheckboxResult">
+      <label class="form-check-label" for="showAllCheckboxResult">Show all planets</label>
+    </div>
+  <div class="orbit-container-wrapper">
+    <button id="orbitFullscreenBtnResult" class="btn btn-light btn-sm enlarge-btn" title="Toggle full screen"><i class="fas fa-expand"></i></button>
+    <div id="orbit-container-result" style="width: 100%; height: 300px;"></div>
+  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    /*
+     * Enhanced orbit viewer on result page with real dataset integration.
+     * Exoplanet data is loaded from a local JSON file. Selecting a dataset
+     * populates a planet dropdown; selecting a planet updates the orbit.
+     */
+    function initOrbitViewerResult() {
+      const container = document.getElementById('orbit-container-result');
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 1000);
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      container.appendChild(renderer.domElement);
+      const ambient = new THREE.AmbientLight(0xffffff, 0.8);
+      scene.add(ambient);
+      // Load textures for star and planet
+      const loader = new THREE.TextureLoader();
+      const starTexture   = loader.load("{{ url_for('static', filename='textures/star_texture.png') }}");
+      const planetTexture = loader.load("{{ url_for('static', filename='textures/planet_texture.png') }}");
+      // Materials with realistic shading
+      const starMaterial   = new THREE.MeshPhongMaterial({ map: starTexture, emissive: 0xffcc00, emissiveIntensity: 0.8 });
+      const planetMaterial = new THREE.MeshPhongMaterial({ map: planetTexture, shininess: 15 });
+      // Star and planet meshes
+      const star = new THREE.Mesh(new THREE.SphereGeometry(0.4, 64, 64), starMaterial);
+      scene.add(star);
+      const planet = new THREE.Mesh(new THREE.SphereGeometry(0.08, 64, 64), planetMaterial);
+      scene.add(planet);
+      // Directional light for shading
+      const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+      dirLight.position.set(5, 10, 7);
+      scene.add(dirLight);
+      // Orbit config for single selected planet
+      let orbitConfig = { radius: 2.5, speed: 0.015, color: 0x0088ff };
+      let theta = 0;
+      // Multi-planet list when showing all
+      let planetMeshes = [];
+      // Orbit lines: single orbit and multi-orbits
+      let singleOrbitLine;
+      let orbitLines = [];
+      let showAll = false;
+      // Helper to create a circular orbit line in XZ-plane
+      function createOrbitLine(radius, color = 0xffffff) {
+        const curve = new THREE.EllipseCurve(0, 0, radius, radius, 0, 2 * Math.PI, false, 0);
+        const points = curve.getPoints(128);
+        const geometry = new THREE.BufferGeometry().setFromPoints(points.map(p => new THREE.Vector3(p.x, 0, p.y)));
+        const material = new THREE.LineBasicMaterial({ color: color, opacity: 0.3, transparent: true });
+        return new THREE.LineLoop(geometry, material);
+      }
+      // Create initial orbit line for default planet
+      singleOrbitLine = createOrbitLine(orbitConfig.radius);
+      scene.add(singleOrbitLine);
+      function updateSingleOrbitLine(radius) {
+        if (singleOrbitLine) {
+          scene.remove(singleOrbitLine);
+        }
+        singleOrbitLine = createOrbitLine(radius);
+        scene.add(singleOrbitLine);
+      }
+      function clearOrbitLines() {
+        orbitLines.forEach(line => scene.remove(line));
+        orbitLines = [];
+      }
+      function updateOrbitLinesForDataset(datasetKey) {
+        clearOrbitLines();
+        if (!exoplanets || !exoplanets[datasetKey]) return;
+        const list = exoplanets[datasetKey];
+        list.forEach(entry => {
+          const radiusVal = 2.0 + (entry.radius || 1) * 0.5;
+          const line = createOrbitLine(radiusVal, 0xffffff);
+          line.material.opacity = 0.25;
+          scene.add(line);
+          orbitLines.push(line);
+        });
+      }
+      camera.position.set(0, 4, 6);
+      camera.lookAt(scene.position);
+      // Preserve the original camera position for fullscreen scaling
+      let originalCameraPosition = camera.position.clone();
+      function animate() {
+        requestAnimationFrame(animate);
+        if (showAll && planetMeshes.length > 0) {
+          planetMeshes.forEach(item => {
+            item.theta += item.speed;
+            item.mesh.material.color.setHex(item.color);
+            item.mesh.position.set(item.radius * Math.cos(item.theta), 0, item.radius * Math.sin(item.theta));
+          });
+          planet.visible = false;
+        } else {
+          theta += orbitConfig.speed;
+          planet.material.color.setHex(orbitConfig.color);
+          planet.position.set(orbitConfig.radius * Math.cos(theta), 0, orbitConfig.radius * Math.sin(theta));
+          planet.visible = true;
+        }
+        renderer.render(scene, camera);
+      }
+      animate();
+      // Load exoplanet data
+      let exoplanets = {};
+      fetch("{{ url_for('static', filename='data/exoplanets.json') }}")
+        .then(response => response.json())
+        .then(data => {
+          exoplanets = data;
+        })
+        .catch(err => {
+          console.error('Failed to load exoplanet dataset:', err);
+        });
+      // Selection elements
+      const datasetSelect = document.getElementById('datasetSelectResult');
+      const planetSelect  = document.getElementById('planetSelectResult');
+      const planetRow     = document.getElementById('planet-row-result');
+      const showAllCheckbox = document.getElementById('showAllCheckboxResult');
+      const fullscreenBtn   = document.getElementById('orbitFullscreenBtnResult');
+      function setOrbitFromPlanet(entry, datasetKey) {
+        if (!entry) return;
+        const baseRadius = 2.0;
+        orbitConfig.radius = baseRadius + (entry.radius || 1) * 0.5;
+        const baseSpeed = 0.005;
+        orbitConfig.speed = baseSpeed + (entry.period ? (1 / entry.period) * 0.05 : 0.015);
+        const colors = { kepler: 0xff5555, k2: 0x55ff55, tess: 0x5555ff };
+        orbitConfig.color = colors[datasetKey] || 0x0088ff;
+        theta = 0;
+        // Update single orbit line with new radius
+        updateSingleOrbitLine(orbitConfig.radius);
+      }
+      // Helper to clear multi-planet meshes
+      function clearPlanetMeshes() {
+        planetMeshes.forEach(item => {
+          scene.remove(item.mesh);
+        });
+        planetMeshes = [];
+      }
+      // Helper to populate multi-planet meshes for a dataset
+      function updatePlanetMeshesForDataset(datasetKey) {
+        clearPlanetMeshes();
+        if (!exoplanets || !exoplanets[datasetKey]) return;
+        const list = exoplanets[datasetKey];
+        const palette = [0xff5555, 0x55ff55, 0x5555ff, 0xffaa00, 0xaa00ff, 0x00ffaa];
+        list.forEach((entry, idx) => {
+          const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.08, 32, 32), new THREE.MeshBasicMaterial({ color: palette[idx % palette.length] }));
+          const radius = 2.0 + (entry.radius || 1) * 0.5;
+          const speed  = 0.005 + (entry.period ? (1 / entry.period) * 0.05 : 0.015);
+          scene.add(mesh);
+          planetMeshes.push({ mesh: mesh, radius: radius, speed: speed, color: palette[idx % palette.length], theta: 0 });
+        });
+        // Also create orbit lines for all planets
+        updateOrbitLinesForDataset(datasetKey);
+      }
+      if (datasetSelect) {
+        datasetSelect.addEventListener('change', function() {
+          const datasetKey = this.value;
+        if (!exoplanets || !exoplanets[datasetKey] || datasetKey === 'default') {
+          // When no valid dataset is selected, hide the planet selector
+          planetRow.style.display = 'none';
+          // Reset orbit configuration to its default values
+          orbitConfig = { radius: 2.5, speed: 0.015, color: 0x0088ff };
+          // Remove any existing multi‑planet meshes and orbit lines
+          clearPlanetMeshes();
+          clearOrbitLines();
+          // Draw a fresh single‑planet orbit line for the default radius
+          updateSingleOrbitLine(orbitConfig.radius);
+          return;
+        }
+          const list = exoplanets[datasetKey];
+          planetSelect.innerHTML = '';
+          list.forEach((obj, idx) => {
+            const opt = document.createElement('option');
+            opt.value = obj.name;
+            opt.textContent = obj.name;
+            if (idx === 0) opt.selected = true;
+            planetSelect.appendChild(opt);
+          });
+          planetRow.style.display = '';
+          setOrbitFromPlanet(list[0], datasetKey);
+          if (showAll) {
+            updatePlanetMeshesForDataset(datasetKey);
+          }
+        });
+      }
+      if (planetSelect) {
+        planetSelect.addEventListener('change', function() {
+          const datasetKey = datasetSelect.value;
+          const selectedName = this.value;
+          const list = exoplanets[datasetKey] || [];
+          const entry = list.find(obj => obj.name === selectedName);
+          setOrbitFromPlanet(entry, datasetKey);
+        });
+      }
+      // Show all checkbox handler
+      if (showAllCheckbox) {
+        showAllCheckbox.addEventListener('change', function() {
+          showAll = this.checked;
+          const datasetKey = datasetSelect.value;
+          if (showAll) {
+            if (datasetKey && exoplanets[datasetKey]) {
+              updatePlanetMeshesForDataset(datasetKey);
+            }
+          } else {
+            clearPlanetMeshes();
+            clearOrbitLines();
+            updateSingleOrbitLine(orbitConfig.radius);
+          }
+        });
+      }
+      // Fullscreen toggle
+      if (fullscreenBtn) {
+        fullscreenBtn.addEventListener('click', function() {
+          const wrapper = container.parentElement;
+          wrapper.classList.toggle('fullscreen');
+          const icon = this.querySelector('i');
+          if (wrapper.classList.contains('fullscreen')) {
+            icon.classList.remove('fa-expand');
+            icon.classList.add('fa-compress');
+          } else {
+            icon.classList.remove('fa-compress');
+            icon.classList.add('fa-expand');
+          }
+          // Adjust camera position for fullscreen mode to enlarge the orbit visualization
+          const isFullscreen = wrapper.classList.contains('fullscreen');
+          if (isFullscreen) {
+            camera.position.set(
+              originalCameraPosition.x,
+              originalCameraPosition.y * 0.6,
+              originalCameraPosition.z * 0.6
+            );
+          } else {
+            camera.position.copy(originalCameraPosition);
+          }
+          camera.lookAt(scene.position);
+          camera.aspect = container.clientWidth / container.clientHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(container.clientWidth, container.clientHeight);
+        });
+      }
+      window.addEventListener('resize', () => {
+        camera.aspect = container.clientWidth / container.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(container.clientWidth, container.clientHeight);
+      });
+    }
+    document.addEventListener('DOMContentLoaded', initOrbitViewerResult);
+  </script>
+  <a href="/" class="btn btn-secondary mt-3">Back to home</a>
+</div>
+</body>
+</html>
