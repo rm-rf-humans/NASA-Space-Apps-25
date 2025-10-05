@@ -1,0 +1,13 @@
+Flask>=2.0
+# Gunicorn is used in production to serve the Flask app
+gunicorn>=21.2.0
+# Lightkurve provides tools for downloading and analyzing Kepler, K2 and TESS light curves
+lightkurve==2.4.2
+# Astropy and related dependencies are required by Lightkurve
+astropy>=5.3
+# Additional scientific libraries for handling numerical data
+numpy>=1.22
+pandas>=1.5
+# scikit-learn and joblib are used for model loading (if integrated later)
+scikit-learn>=1.2
+joblib>=1.2
